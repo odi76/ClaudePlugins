@@ -1,0 +1,15 @@
+{
+  "plugins": [
+    {
+      "name": "mendix-epics",
+      "version": "0.1.0",
+      "source": "./mendix-epics"
+    }
+  ],
+  "name": "claude-plugins",
+  "version": "1.0.0",
+  "description": "Egy  marketplace-e Claude plugin-ek számára.",
+  "owner": {
+    "name": "Dányi István"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "mendix-epics",
+  "version": "0.1.0",
+  "description": "Read and write a Mendix Epics backlog - list, search, export, create and update stories, epics and tasks - through the Mendix Epics API.",
+  "author": {
+    "name": "István Dányi"
+  },
+  "keywords": [
+    "mendix",
+    "epics",
+    "backlog",
+    "stories",
+    "project-management"
+  ]
+}
