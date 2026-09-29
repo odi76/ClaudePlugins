@@ -22,6 +22,20 @@ list, or `<command> --help` for one command.
 Two things must be set up once per person. Check with `check`; it prints the app
 and the available statuses when both are in place.
 
+**Plugin settings first.** The plugin can carry both values in its own settings,
+filled in when the plugin is enabled (or later in `/config`):
+
+- App ID from the plugin settings: `${user_config.app_id}`, saved under the name
+  `${user_config.app_name}`.
+- The PAT is a sensitive setting and never appears here.
+
+A SessionStart hook copies both into the tool's stores (the PAT to the same
+encrypted/0600 file `set-pat` writes, the app as the default in `epics.json`), so
+when they are filled in, `check` works without the steps below. If the app ID
+above is empty or still shows a `${…}` placeholder, the setting is not in use —
+fall back to the manual steps. When `check` reports no PAT or no app, suggest
+filling in the plugin settings first, and the manual steps second.
+
 1. **A Personal Access Token.** Direct the user to <https://user-settings.mendix.com/>
    to create one with **both** `mx:epics:read` and `mx:epics:write` scopes, then
    have them run `set-pat` themselves and paste it at the prompt. Scopes cannot be

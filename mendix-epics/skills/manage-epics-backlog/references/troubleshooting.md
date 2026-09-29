@@ -27,6 +27,23 @@ under the app's general settings.
 Saved apps live in `~/.mendix/epics.json` (on Windows `%USERPROFILE%\.mendix\epics.json`).
 It holds app IDs only — never a token.
 
+## Plugin settings did not take effect
+
+The plugin's settings (app ID, app name, PAT) are applied by a SessionStart hook,
+`scripts/apply_plugin_config.py`, at the start of each session. It writes only
+when a value changed and never deletes anything, so clearing a setting leaves the
+last stored value in place — use `set-pat` / `set-app` to replace it.
+
+- `pat-status` shows the PAT file as the source once the hook has run.
+- `apps` shows the configured app as the default.
+- If neither changed, the hook did not run in this environment (hooks from a
+  plugin may not run on every surface), Python is not on the hook's `PATH`, or
+  the setting is empty. Start a new session after changing a setting; fall back
+  to `set-pat` / `set-app` if it still has no effect.
+- An `app_id` that is not a UUID is ignored with a message on stderr.
+- `MENDIX_EPICS_PAT` / `MENDIX_PAT` and `MENDIX_APP_ID` in the environment still
+  take precedence over anything the hook stored.
+
 ## Credential storage per platform
 
 | Platform | `set-pat` writes | Protection |

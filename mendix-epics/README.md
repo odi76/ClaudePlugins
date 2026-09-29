@@ -16,6 +16,24 @@ Works with any Mendix app that uses Epics, and with several apps side by side.
 
 ## Setup, once per person
 
+### Through the plugin settings (recommended)
+
+When the plugin is enabled, Claude asks for three optional settings (they can be
+changed later in `/config`):
+
+| Setting | What it is |
+|---|---|
+| Mendix App ID | The app's UUID. Saved as the default app. |
+| App short name | The name it is saved under (default: `default`), for `--app`. |
+| Mendix Personal Access Token | Masked, kept in the platform's secure credential store. |
+
+At the start of every session a small hook copies them to where the tool looks —
+the token to the same encrypted (Windows) or owner-only (macOS/Linux) file that
+`set-pat` writes, the app into `~/.mendix/epics.json`. Nothing is written when
+nothing changed, and the token is never printed.
+
+### Manually
+
 Ask Claude to set up the Epics backlog connection, or run it directly:
 
 ```bash
@@ -74,3 +92,5 @@ an assignee and labels.
   API and on troubleshooting.
 - `scripts/epics.py` — the command-line tool the skill drives. Run it with
   `--help` to use it directly.
+- `scripts/apply_plugin_config.py` and `hooks/hooks.json` — the SessionStart hook
+  that applies the plugin settings.

@@ -1,6 +1,6 @@
 {
   "name": "mendix-epics",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Read and write a Mendix Epics backlog - list, search, export, create and update stories, epics and tasks - through the Mendix Epics API.",
   "author": {
     "name": "István Dányi"
@@ -11,5 +11,27 @@
     "backlog",
     "stories",
     "project-management"
-  ]
+  ],
+  "userConfig": {
+    "app_id": {
+      "type": "string",
+      "title": "Mendix App ID",
+      "description": "UUID of the Mendix app whose Epics backlog to use (Developer Portal > General settings, or the Team Server repository URL). Saved as the default app at session start. Leave empty to choose apps with set-app.",
+      "required": false
+    },
+    "app_name": {
+      "type": "string",
+      "title": "App short name",
+      "description": "Name the app ID is saved under, used with --app. Defaults to 'default'.",
+      "default": "default",
+      "required": false
+    },
+    "epics_pat": {
+      "type": "string",
+      "title": "Mendix Personal Access Token",
+      "description": "PAT from https://user-settings.mendix.com/ with both mx:epics:read and mx:epics:write scopes. Stored in secure storage and copied at session start to the tool's own PAT store (DPAPI-encrypted on Windows). Leave empty to use set-pat instead.",
+      "sensitive": true,
+      "required": false
+    }
+  }
 }
