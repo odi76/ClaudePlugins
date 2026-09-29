@@ -6,10 +6,10 @@
       "source": "./mendix-epics"
     }
   ],
-  "name": "claude-plugins",
+  "name": "danyi-plugins",
   "version": "1.0.0",
   "description": "Egy  marketplace-e Claude plugin-ek számára.",
   "owner": {
-    "name": "Dányi István"
+    "name": "István Dányi"
   }
 }
