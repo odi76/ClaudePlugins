@@ -587,6 +587,10 @@ def html_to_text(markup: str) -> str:
 def cmd_story(args) -> None:
     app = resolve_app_id(args)
     story = call(args, "GET", f"/projects/{app}/stories/{args.id}")
+    if args.with_tasks:
+        tasks = call(args, "GET", f"/projects/{app}/stories/{args.id}/tasks")
+        story["tasks"] = sorted((tasks or {}).get("tasks") or [],
+                                key=lambda t: t.get("sortId", 0))
     if args.json:
         print(json.dumps(story, ensure_ascii=False, indent=2))
         return
@@ -602,6 +606,9 @@ def cmd_story(args) -> None:
     if body.strip():
         print()
         print(body.strip())
+    if args.with_tasks:
+        print()
+        show(args, story["tasks"], ["sortId", "isDone", "title"])
 
 
 def cmd_create_story(args) -> None:
@@ -611,12 +618,101 @@ def cmd_create_story(args) -> None:
         print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
+# JSON key -> PATCH field. `status` is what get-story returns, `storyStatus` what
+# the API takes; both are accepted so a get-story output can be edited and fed back.
+JSON_UPDATE_FIELDS = {
+    "title": "title",
+    "description": "description",
+    "storyType": "storyType",
+    "storyPoints": "storyPoints",
+    "storyLevel": "storyLevel",
+    "status": "storyStatus",
+    "storyStatus": "storyStatus",
+}
+# Returned by get-story but not writable; skipped so its output can be reused.
+JSON_READ_ONLY_FIELDS = ("uuid", "storyId", "sortId", "numberOfTasks", "tasks",
+                         "descriptionHTML", "descriptionPlain")
+# Where the current value of a PATCH field lives in a GET response.
+CURRENT_VALUE_KEYS = {"storyStatus": "status", "description": "descriptionPlain"}
+
+
+def load_json_object(source: str, example: str) -> dict:
+    """One JSON object from a file, or from stdin when source is '-'."""
+    try:
+        # bytes, not sys.stdin.read(): a Windows pipe would decode with the
+        # locale code page and mangle the Hungarian accents
+        raw = sys.stdin.buffer.read().decode("utf-8-sig") if source == "-" \
+            else Path(source).read_text(encoding="utf-8-sig")
+        data = json.loads(raw)
+    except OSError as exc:
+        raise EpicsError(f"Could not read {source}: {exc}") from None
+    except ValueError as exc:
+        raise EpicsError(f"{source} is not valid JSON: {exc}") from None
+    if not isinstance(data, dict):
+        raise EpicsError(f"The JSON must be a single object, e.g. {example}")
+    return data
+
+
+def json_update_body(args, app: str) -> dict:
+    """PATCH body from a JSON file, holding only the fields that actually change."""
+    data = load_json_object(args.from_json, '{"title": "...", "storyPoints": 3}')
+
+    if data.get("storyId") and data["storyId"] != args.id:
+        raise EpicsError(f"The JSON is for {data['storyId']}, not {args.id}. "
+                         "Refusing to update the wrong story.")
+    unknown = sorted(set(data) - set(JSON_UPDATE_FIELDS) - set(JSON_READ_ONLY_FIELDS))
+    if unknown:
+        raise EpicsError(f"Unknown field(s): {', '.join(unknown)}. Writable: "
+                         + ", ".join(JSON_UPDATE_FIELDS))
+    wanted: dict = {}
+    for key, field in JSON_UPDATE_FIELDS.items():
+        if key in data and data[key] is not None:
+            wanted[field] = data[key]
+    if "storyType" in wanted and wanted["storyType"] not in STORY_TYPES:
+        raise EpicsError(f"storyType must be one of {', '.join(STORY_TYPES)}")
+    if "storyLevel" in wanted and wanted["storyLevel"] not in STORY_LEVELS:
+        raise EpicsError(f"storyLevel must be one of {', '.join(STORY_LEVELS)}")
+    if "storyPoints" in wanted:
+        points = wanted["storyPoints"]
+        if isinstance(points, bool) or not isinstance(points, int) or points < 0:
+            raise EpicsError("storyPoints must be a whole number, 0 or more")
+
+    current = call(args, "GET", f"/projects/{app}/stories/{args.id}")
+    if "description" not in data and any(
+            key in data and data[key] != current.get(key)
+            for key in ("descriptionPlain", "descriptionHTML")):
+        raise EpicsError("descriptionPlain / descriptionHTML were edited, but they are "
+                         "read-only. Put the new text in a 'description' field instead.")
+    changes = {f: v for f, v in wanted.items()
+               if current.get(CURRENT_VALUE_KEYS.get(f, f)) != v}
+
+    if "storyStatus" in changes:
+        statuses = call(args, "GET", f"/projects/{app}/statuses").get("statuses") or []
+        names = [s["name"] for s in statuses]
+        if changes["storyStatus"] not in names:
+            raise EpicsError(f"Unknown status '{changes['storyStatus']}'. "
+                             f"This app has: {', '.join(names)}")
+
+    for field, value in changes.items():
+        old = current.get(CURRENT_VALUE_KEYS.get(field, field))
+        if field == "description":
+            print(f"  description: changed ({len(old or '')} -> {len(value)} chars)",
+                  file=sys.stderr)
+        else:
+            print(f"  {field}: {old!r} -> {value!r}", file=sys.stderr)
+    return changes
+
+
 def cmd_update_story(args) -> None:
     app = resolve_app_id(args)
-    body = story_body(args, True)
+    body = json_update_body(args, app) if args.from_json else {}
+    body.update(story_body(args, True))      # explicit flags win over the JSON
     if not body:
+        if args.from_json:
+            print(f"{args.id} already matches the JSON - nothing to update.")
+            return
         raise EpicsError("Nothing to update. Pass at least one of --title --description "
-                         "--type --points --level --status")
+                         "--type --points --level --status, or --from-json")
     write_call(args, "PATCH", f"/projects/{app}/stories/{args.id}", body)
     if not args.dry_run:
         print(f"Updated {args.id}")
@@ -624,14 +720,41 @@ def cmd_update_story(args) -> None:
 
 def cmd_tasks(args) -> None:
     app = resolve_app_id(args)
-    result = call(args, "GET", f"/projects/{app}/stories/{args.id}/tasks")
-    show(args, sorted(result.get("tasks") or [], key=lambda t: t.get("sortId", 0)),
-         ["sortId", "isDone", "title"])
+    if args.id:
+        result = call(args, "GET", f"/projects/{app}/stories/{args.id}/tasks")
+        show(args, sorted(result.get("tasks") or [], key=lambda t: t.get("sortId", 0)),
+             ["sortId", "isDone", "title"])
+        return
+    # No story given: every task of the app. There is no app-wide task endpoint,
+    # so only the stories whose numberOfTasks says they have any are asked.
+    every_page = argparse.Namespace(**{**vars(args), "all": True, "limit": 100, "offset": 0})
+    rows = []
+    for story in get_paged(every_page, "stories", "stories", "totalStories"):
+        if not story.get("numberOfTasks"):
+            continue
+        result = call(args, "GET", f"/projects/{app}/stories/{story['storyId']}/tasks")
+        for task in sorted(result.get("tasks") or [], key=lambda t: t.get("sortId", 0)):
+            if args.open and task.get("isDone"):
+                continue
+            rows.append({"storyId": story["storyId"], "storyLevel": story.get("storyLevel"),
+                         **task})
+    print(f"{len(rows)} tasks", file=sys.stderr)
+    show(args, rows, ["storyId", "storyLevel", "sortId", "isDone", "title"])
 
 
 def cmd_create_task(args) -> None:
     app = resolve_app_id(args)
-    body = [{"title": args.title, "isDone": bool(args.done)}]
+    titles = [t.strip() for t in args.title if t.strip()]
+    if not titles:
+        raise EpicsError("A task needs a non-empty --title.")
+    # Tasks cannot be edited or deleted through the API, so flag repeats first.
+    # This GET also fails early on a wrong story ID.
+    existing = call(args, "GET", f"/projects/{app}/stories/{args.id}/tasks") or {}
+    have = {str(t.get("title", "")).strip().casefold() for t in existing.get("tasks") or []}
+    for title in titles:
+        if title.casefold() in have:
+            print(f"WARNING: {args.id} already has a task '{title}'", file=sys.stderr)
+    body = [{"title": t, "isDone": bool(args.done)} for t in titles]
     result = write_call(args, "POST", f"/projects/{app}/stories/{args.id}/tasks", body)
     if result:
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -655,75 +778,295 @@ def _epic_body(args) -> dict:
     return body
 
 
+# The epic list only carries the readable ID (PAY-EP-3), while PATCH and DELETE
+# take the epic's UUID - and no endpoint maps one to the other. The UUID is
+# returned once, by create-epic, and is part of the epic's link in the Epics UI
+# (https://epics.mendix.com/link/epic/PAY-EP-3--<uuid>). Both are remembered per
+# app in epics.json, so a readable ID works once its UUID has been seen.
+EPIC_LINK_RE = re.compile(r"/link/epic/([^/?#]+?)--(" + UUID_RE + r")")
+
+
+def remember_epic_uuid(app: str, readable: str, uuid: str) -> None:
+    config = load_config()
+    known = config.setdefault("epicUuids", {}).setdefault(app, {})
+    if known.get(readable) != uuid:
+        known[readable] = uuid
+        save_config(config)
+
+
+def epic_identity(app: str, ref: str) -> tuple[str | None, str | None]:
+    """(readable ID, UUID) of an epic given as a UUID, an Epics link or a readable ID.
+
+    Either half may be None when it has not been seen yet.
+    """
+    ref = ref.strip()
+    known = (load_config().get("epicUuids") or {}).get(app) or {}
+    link = EPIC_LINK_RE.search(ref)
+    if link:
+        remember_epic_uuid(app, link.group(1), link.group(2))
+        return link.group(1), link.group(2)
+    if re.fullmatch(UUID_RE, ref):
+        readable = next((r for r, u in known.items() if u.lower() == ref.lower()), None)
+        return readable, ref
+    return ref, known.get(ref)
+
+
+def resolve_epic_uuid(app: str, ref: str) -> str:
+    """Epic UUID from a UUID, an Epics link, or a readable ID seen before."""
+    _, uuid = epic_identity(app, ref)
+    if uuid:
+        return uuid
+    raise EpicsError(
+        f"The UUID of epic '{ref}' is not known. The Epics API lists epics only by "
+        "their readable ID, but changes them only by UUID, and has no lookup "
+        "between the two.\n"
+        "Open the epic in the Epics UI, copy its link (it ends in "
+        f"'{ref}--<uuid>') and pass that link instead. The UUID is remembered, so "
+        f"next time '{ref}' works on its own."
+    )
+
+
+def find_epic(args, app: str, readable: str) -> dict:
+    """One epic from the list - the API has no single-epic GET."""
+    every_page = argparse.Namespace(**{**vars(args), "all": True, "limit": 100, "offset": 0})
+    for epic in get_paged(every_page, "epics", "epics", "totalEpics"):
+        if epic.get("epicId") == readable:
+            return epic
+    raise EpicsError(f"No epic '{readable}' in this app. List them with: epics.py epics --all")
+
+
+def cmd_epic(args) -> None:
+    app = resolve_app_id(args)
+    readable, uuid = epic_identity(app, args.epic)
+    if not readable:
+        raise EpicsError(f"Epic UUID {args.epic} has not been seen yet, and the API "
+                         "cannot look an epic up by UUID. Pass its readable ID "
+                         "(e.g. PAY-EP-3) or its link from the Epics UI.")
+    # uuid is added by the tool (null when not yet known): the API never lists it,
+    # but update-epic and delete-epic need it
+    epic = {**find_epic(args, app, readable), "uuid": uuid}
+    if args.json:
+        print(json.dumps(epic, ensure_ascii=False, indent=2))
+        return
+    print(f"{epic['epicId']}  {epic.get('name', '')}")
+    print(f"stories: {epic.get('numberOfStories')} / points: {epic.get('numberOfStoryPoints')}")
+    print(f"uuid: {uuid or '(unknown - pass the epic link from the Epics UI once)'}")
+    objective = html_to_text(epic.get("objective") or "")
+    if objective:
+        print()
+        print(objective)
+
+
+EPIC_JSON_WRITABLE = ("name", "objective", "labels", "assigneeId")
+# Returned by get-epic but not writable; skipped so its output can be reused.
+EPIC_JSON_READ_ONLY = ("epicId", "uuid", "numberOfStories", "numberOfStoryPoints")
+
+
+def epic_fields_from_json(data: dict) -> dict:
+    """The writable epic fields of a JSON object, validated."""
+    unknown = sorted(set(data) - set(EPIC_JSON_WRITABLE) - set(EPIC_JSON_READ_ONLY))
+    if unknown:
+        raise EpicsError(f"Unknown field(s): {', '.join(unknown)}. Writable: "
+                         + ", ".join(EPIC_JSON_WRITABLE))
+    wanted = {k: data[k] for k in EPIC_JSON_WRITABLE if data.get(k) is not None}
+    if "labels" in wanted and not (isinstance(wanted["labels"], list)
+                                   and all(isinstance(x, str) for x in wanted["labels"])):
+        raise EpicsError('labels must be a list of strings, e.g. ["Security", "Phase-2"]')
+    if not str(wanted.get("name", "x")).strip():
+        raise EpicsError("name cannot be empty")
+    return wanted
+
+
+def epic_json_body(args, app: str, readable: str | None) -> dict:
+    """PATCH body from a JSON file. name and objective are only sent when they
+    differ from the live epic; labels and assigneeId are not in the epic list,
+    so they cannot be compared and are sent as given."""
+    data = load_json_object(args.from_json, '{"name": "...", "objective": "..."}')
+    if data.get("epicId") and readable and data["epicId"] != readable:
+        raise EpicsError(f"The JSON is for {data['epicId']}, not {readable}. "
+                         "Refusing to update the wrong epic.")
+    wanted = epic_fields_from_json(data)
+
+    current = find_epic(args, app, readable) if readable else {}
+    changes = {}
+    for key, value in wanted.items():
+        if key in ("name", "objective") and current and current.get(key) == value:
+            continue
+        old = current.get(key) if key in ("name", "objective") else "(not listed by the API)"
+        if key == "objective":
+            print(f"  objective: changed ({len(old or '')} -> {len(value)} chars)",
+                  file=sys.stderr)
+        else:
+            print(f"  {key}: {old!r} -> {value!r}", file=sys.stderr)
+        changes[key] = value
+    return changes
+
+
 def cmd_create_epic(args) -> None:
     app = resolve_app_id(args)
-    result = write_call(args, "POST", f"/projects/{app}/epics", _epic_body(args))
+    body = {}
+    if args.from_json:
+        data = load_json_object(args.from_json, '{"name": "...", "objective": "..."}')
+        body = epic_fields_from_json(data)
+    body.update(_epic_body(args))      # explicit flags win over the JSON
+    if not str(body.get("name") or "").strip():
+        raise EpicsError("An epic needs a name: pass --name, or a 'name' in the JSON.")
+
+    every_page = argparse.Namespace(**{**vars(args), "all": True, "limit": 100, "offset": 0})
+    twins = [e["epicId"] for e in get_paged(every_page, "epics", "epics", "totalEpics")
+             if str(e.get("name", "")).strip().casefold() == body["name"].strip().casefold()]
+    if twins:
+        print(f"WARNING: an epic named '{body['name']}' already exists: "
+              f"{', '.join(twins)}", file=sys.stderr)
+
+    result = write_call(args, "POST", f"/projects/{app}/epics", body)
     if result:
+        # here epicId is the UUID, unlike in the epic list
+        if result.get("readableEpicId") and result.get("epicId"):
+            remember_epic_uuid(app, result["readableEpicId"], result["epicId"])
         print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 def cmd_update_epic(args) -> None:
     app = resolve_app_id(args)
-    body = _epic_body(args)
+    uuid = resolve_epic_uuid(app, args.epic)
+    readable, _ = epic_identity(app, args.epic)
+    body = epic_json_body(args, app, readable) if args.from_json else {}
+    body.update(_epic_body(args))      # explicit flags win over the JSON
     if not body:
+        if args.from_json:
+            print(f"{readable or args.epic} already matches the JSON - nothing to update.")
+            return
         raise EpicsError("Nothing to update. Pass at least one of --name --objective "
-                         "--labels --assignee-id")
-    write_call(args, "PATCH", f"/projects/{app}/epics/{args.uuid}", body)
+                         "--labels --assignee-id, or --from-json")
+    write_call(args, "PATCH", f"/projects/{app}/epics/{uuid}", body)
     if not args.dry_run:
-        print(f"Updated epic {args.uuid}")
+        print(f"Updated epic {readable or args.epic}")
 
 
 def cmd_delete_epic(args) -> None:
     if not args.force and not args.dry_run:
-        raise EpicsError(f"Refusing to delete epic {args.uuid} without --force "
+        raise EpicsError(f"Refusing to delete epic {args.epic} without --force "
                          "(deleting an epic cannot be undone).")
     app = resolve_app_id(args)
-    write_call(args, "DELETE", f"/projects/{app}/epics/{args.uuid}")
+    uuid = resolve_epic_uuid(app, args.epic)
+    write_call(args, "DELETE", f"/projects/{app}/epics/{uuid}")
     if not args.dry_run:
-        print(f"Deleted epic {args.uuid}")
+        print(f"Deleted epic {args.epic}")
+
+
+IMPORT_BATCH = 50      # the API rejects a POST with more stories than this
+IMPORT_FIELDS = ("title", "description", "storyType", "storyPoints", "storyLevel")
+
+
+def import_payload(items: list, fallback_level: str | None) -> list[dict]:
+    """Validate every item up front and report all problems at once, by number."""
+    problems: list[str] = []
+    payload: list[dict] = []
+    for number, item in enumerate(items, 1):
+        where = f"item {number}"
+        if not isinstance(item, dict):
+            problems.append(f"{where}: not a JSON object")
+            continue
+        title = str(item.get("title") or "").strip()
+        if title:
+            where += f" ('{title[:40]}')"
+        else:
+            problems.append(f"{where}: missing title")
+        unknown = sorted(set(item) - set(IMPORT_FIELDS))
+        if unknown:
+            problems.append(f"{where}: unknown field(s) {', '.join(unknown)} "
+                            f"- allowed: {', '.join(IMPORT_FIELDS)}")
+        entry: dict = {"title": title}
+        if item.get("description"):
+            entry["description"] = str(item["description"])
+        if item.get("storyType"):
+            if item["storyType"] in STORY_TYPES:
+                entry["storyType"] = item["storyType"]
+            else:
+                problems.append(f"{where}: storyType must be {' or '.join(STORY_TYPES)}")
+        level = item.get("storyLevel") or fallback_level
+        if level:
+            if level in STORY_LEVELS:
+                entry["storyLevel"] = level
+            else:
+                problems.append(f"{where}: storyLevel must be one of {', '.join(STORY_LEVELS)}")
+        points = item.get("storyPoints")
+        if points is not None:
+            if isinstance(points, bool) or not isinstance(points, int) or points < 0:
+                problems.append(f"{where}: storyPoints must be a whole number, 0 or more")
+            else:
+                entry["storyPoints"] = points
+        payload.append(entry)
+    if problems:
+        raise EpicsError("The import file has problems - nothing was sent:\n  "
+                         + "\n  ".join(problems))
+    return payload
 
 
 def cmd_import(args) -> None:
-    """Bulk create from a JSON file: an array of
-    {title, description, storyType, storyPoints, storyLevel}.
-    """
-    source = Path(args.file)
-    if not source.is_file():
-        raise EpicsError(f"File not found: {source}")
-    items = json.loads(source.read_text(encoding="utf-8"))
+    """Bulk create from JSON: an array of {title, description, storyType,
+    storyPoints, storyLevel}, from a file or stdin ('-')."""
+    try:
+        raw = sys.stdin.buffer.read().decode("utf-8-sig") if args.file == "-" \
+            else Path(args.file).read_text(encoding="utf-8-sig")
+        items = json.loads(raw)
+    except OSError as exc:
+        raise EpicsError(f"Could not read {args.file}: {exc}") from None
+    except ValueError as exc:
+        raise EpicsError(f"{args.file} is not valid JSON: {exc}") from None
     if isinstance(items, dict):
         items = [items]
+    if not isinstance(items, list) or not items:
+        raise EpicsError("The import file must hold a non-empty JSON array of stories.")
+    payload = import_payload(items, args.level)
 
-    payload = []
-    for item in items:
-        if not item.get("title"):
-            raise EpicsError("Every item needs a title.")
-        entry = {"title": item["title"]}
-        for key in ("description", "storyType", "storyLevel"):
-            if item.get(key):
-                entry[key] = item[key]
-        if item.get("storyPoints") is not None:
-            entry["storyPoints"] = int(item["storyPoints"])
-        if "storyLevel" not in entry and args.level:
-            entry["storyLevel"] = args.level
-        payload.append(entry)
+    # The API has no story delete, so flag repeats before anything is sent.
+    app = resolve_app_id(args)
+    every_page = argparse.Namespace(**{**vars(args), "all": True, "limit": 100, "offset": 0})
+    existing = {str(s.get("title", "")).strip().casefold(): s.get("storyId")
+                for s in get_paged(every_page, "stories", "stories", "totalStories")}
+    seen: set[str] = set()
+    for entry in payload:
+        key = entry["title"].casefold()
+        if key in existing:
+            print(f"WARNING: '{entry['title']}' already exists as {existing[key]}",
+                  file=sys.stderr)
+        if key in seen:
+            print(f"WARNING: '{entry['title']}' appears more than once in the file",
+                  file=sys.stderr)
+        seen.add(key)
 
-    print(f"{len(payload)} stories to create", file=sys.stderr)
+    batches = [payload[i:i + IMPORT_BATCH] for i in range(0, len(payload), IMPORT_BATCH)]
+    print(f"{len(payload)} stories to create"
+          + (f" in {len(batches)} requests of at most {IMPORT_BATCH}" if len(batches) > 1 else ""),
+          file=sys.stderr)
     if not args.dry_run and not args.yes:
         raise EpicsError(
             "Refusing to send a bulk import without --yes. Review it first with "
             "--dry-run, then re-run with --yes. (The Epics API has no story "
             "delete, so a wrong import has to be cleaned up by hand.)"
         )
-    app = resolve_app_id(args)
-    result = write_call(args, "POST", f"/projects/{app}/stories", payload)
-    if result:
-        # 200 = all created, 207 = partial; both return an items[] array
-        for item in result.get("items") or []:
+
+    created = failed = 0
+    for batch in batches:
+        result = write_call(args, "POST", f"/projects/{app}/stories", batch)
+        if not result:
+            continue
+        # 200 = all created, 207 = partial; items[] follows the request order
+        for entry, item in zip(batch, result.get("items") or []):
             if item.get("story"):
-                print("created " + item["story"].get("storyId", "?"))
-            elif item.get("code"):
-                print(f"WARNING: {item['code']}: {item.get('detail')}", file=sys.stderr)
+                created += 1
+                print(f"created {item['story'].get('storyId', '?')}  {entry['title']}")
+            else:
+                failed += 1
+                print(f"FAILED  {entry['title']}: {item.get('code')} "
+                      f"{item.get('reason') or item.get('detail') or ''}", file=sys.stderr)
+    if not args.dry_run:
+        print(f"{created} created, {failed} failed")
+        if failed:
+            print("Do not re-run the whole file: that would duplicate the stories "
+                  "already created. Import only the failed ones.", file=sys.stderr)
 
 
 def cmd_export(args) -> None:
@@ -840,36 +1183,52 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = add("story", cmd_story, "show one story")
     p.add_argument("id", help="readable story ID, e.g. BSZ-77")
+    p.add_argument("--with-tasks", action="store_true",
+                   help="also fetch the tasks; with --json they go in a 'tasks' array")
 
     add_story_fields(add("create-story", cmd_create_story, "create a story"), True)
     p = add_story_fields(add("update-story", cmd_update_story, "patch a story"), True)
     p.add_argument("id", help="readable story ID, e.g. BSZ-77")
+    p.add_argument("--from-json", metavar="FILE",
+                   help="JSON object with the fields to set ('-' reads stdin); "
+                        "get-story output is accepted, only changed fields are sent")
 
-    p = add("tasks", cmd_tasks, "list the tasks of a story")
-    p.add_argument("id")
+    p = add("tasks", cmd_tasks, "list the tasks of a story, or of every story")
+    p.add_argument("id", nargs="?", help="story ID; leave out for every story's tasks")
+    p.add_argument("--open", action="store_true",
+                   help="without a story ID: only the tasks not done yet")
     p = add("create-task", cmd_create_task, "add a task to a story")
     p.add_argument("id")
-    p.add_argument("--title", required=True)
-    p.add_argument("--done", action="store_true")
+    p.add_argument("--title", required=True, action="append",
+                   help="task title; repeat to add several tasks in one request")
+    p.add_argument("--done", action="store_true", help="create the task(s) as done")
 
     add_paging(add("epics", cmd_epics, "list epics"))
+    p = add("epic", cmd_epic, "show one epic, with its UUID when known")
+    p.add_argument("epic", help="readable ID (PAY-EP-3), the epic's link, or a known UUID")
     p = add("create-epic", cmd_create_epic, "create an epic")
-    p.add_argument("--name", required=True)
+    p.add_argument("--name", help="required, here or in the JSON")
     p.add_argument("--objective")
     p.add_argument("--labels", nargs="*")
     p.add_argument("--assignee-id")
+    p.add_argument("--from-json", metavar="FILE",
+                   help="JSON object with name, objective, labels, assigneeId "
+                        "('-' reads stdin)")
     p = add("update-epic", cmd_update_epic, "patch an epic")
-    p.add_argument("uuid")
+    p.add_argument("epic", help="epic UUID, its Epics link, or a readable ID (PAY-EP-3) whose UUID is known")
     p.add_argument("--name")
     p.add_argument("--objective")
     p.add_argument("--labels", nargs="*")
     p.add_argument("--assignee-id")
+    p.add_argument("--from-json", metavar="FILE",
+                   help="JSON object with the fields to set ('-' reads stdin); "
+                        "get-epic output is accepted")
     p = add("delete-epic", cmd_delete_epic, "delete an epic (needs --force)")
-    p.add_argument("uuid")
+    p.add_argument("epic", help="epic UUID, its Epics link, or a readable ID (PAY-EP-3) whose UUID is known")
     p.add_argument("--force", action="store_true")
 
     p = add("import", cmd_import, "bulk-create stories from a JSON file")
-    p.add_argument("file")
+    p.add_argument("file", help="JSON array of stories; '-' reads stdin")
     p.add_argument("--level", choices=STORY_LEVELS, help="fallback level for items without one")
     p.add_argument("--yes", action="store_true",
                    help="required to actually send the import (review with --dry-run first)")

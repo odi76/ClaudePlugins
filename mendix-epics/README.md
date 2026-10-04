@@ -68,6 +68,25 @@ calls and pick one per command with `--app <name>`.
 - "Turn these meeting notes into backlog items."
 - "Why does the Epics API say 401?"
 
+## Slash commands
+
+| Command | What it does |
+|---|---|
+| `/mendix-epics:check-connection` | Tests the token and app ID, diagnoses a failure |
+| `/mendix-epics:list-epics [filter]` | The app's epics with story counts and points, or the matching ones in full |
+| `/mendix-epics:create-epic <idea or json>` | Drafts an epic, previews it, creates it after your approval |
+| `/mendix-epics:get-epic <ID or link>` | Every field of one epic as raw JSON, with its UUID when known |
+| `/mendix-epics:update-epic <ID or link> <json>` | Updates an epic from JSON (e.g. edited `get-epic` output) after a preview |
+| `/mendix-epics:list-stories [filter]` | Overview of the backlog, or the stories matching a filter |
+| `/mendix-epics:create-story <idea>` | Drafts a story, previews it, creates it after your approval |
+| `/mendix-epics:get-story <ID>` | Every field of one story, with its tasks, as raw JSON |
+| `/mendix-epics:read-story <ID>` | One story with its description and tasks |
+| `/mendix-epics:update-story <ID> <json>` | Updates a story from JSON (e.g. edited `get-story` output) after a preview |
+| `/mendix-epics:list-tasks [story ID] [open]` | Tasks of one story, or of every story, optionally only the open ones |
+| `/mendix-epics:create-task <story ID> <tasks>` | Adds one or more tasks to a story after your approval |
+| `/mendix-epics:export-backlog [file]` | Markdown snapshot of the whole backlog |
+| `/mendix-epics:import-backlog <file or text>` | Bulk-creates stories from JSON, a spec or notes, after a preview |
+
 ## Safety
 
 The Epics API cannot delete a story, so mistakes have to be cleaned up by hand in
@@ -86,10 +105,16 @@ No story deletion, no assignee or sprint on a story, no writing labels, no
 comments or attachments. Those stay in the Epics UI. Epics themselves do support
 an assignee and labels.
 
+Changing or deleting an existing epic needs its UUID, which the API does not
+list. Copy the epic's link from the Epics UI and give it to Claude once; the
+plugin remembers the UUID from then on. Epics created through the plugin are
+known automatically.
+
 ## Contents
 
 - A skill that teaches Claude the whole workflow, with reference material on the
   API and on troubleshooting.
+- `commands/` — the slash commands above.
 - `scripts/epics.py` — the command-line tool the skill drives. Run it with
   `--help` to use it directly.
 - `scripts/apply_plugin_config.py` and `hooks/hooks.json` — the SessionStart hook

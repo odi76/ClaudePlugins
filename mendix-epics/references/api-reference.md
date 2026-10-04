@@ -24,7 +24,8 @@ interpreted and so it is clear what simply does not exist.
 | PATCH | `/projects/{appId}/epics/{epicUUID}` | `update-epic` |
 | DELETE | `/projects/{appId}/epics/{epicUUID}` | `delete-epic` |
 
-`{storyId}` is the readable ID (`ABC-77`), `{epicUUID}` is a UUID.
+`{storyId}` is the readable ID (`ABC-77`), `{epicUUID}` is a UUID — which the
+epic list does not return; see "Epic fields".
 
 ## Story fields
 
@@ -57,6 +58,24 @@ and the plain form.
 takes `name` (required), `objective`, `labels` (array of strings) and `assigneeId`.
 A created epic comes back with `epicId`, `readableEpicId` and `epicUrl`.
 
+**`epicId` means two different things** (per the official OpenAPI spec,
+<https://docs.mendix.com/openapi-spec/epics.yaml>):
+
+| Response | `epicId` holds |
+|---|---|
+| `GET …/epics` (the list) | the readable ID, e.g. `PAY-EP-3` — there is no UUID field |
+| `POST …/epics` (create) | the UUID; the readable ID is in `readableEpicId` |
+
+PATCH and DELETE take the **UUID**, and no endpoint maps a readable ID to it
+(there is no single-epic GET either). The UUID is also the tail of the epic's
+link in the Epics UI: `https://epics.mendix.com/link/epic/PAY-EP-3--<uuid>`.
+
+So `update-epic` and `delete-epic` accept a UUID, that link, or a readable ID
+whose UUID the tool has already seen. `create-epic` and every link passed in
+store the readable-ID-to-UUID pair per app under `epicUuids` in
+`~/.mendix/epics.json`. For an existing epic never seen before, ask the user to
+copy its link from the Epics UI.
+
 ## Tasks
 
 A task has `title`, `isDone` and `sortId`. Create takes `title` and `isDone`.
@@ -88,8 +107,14 @@ An array of objects; `title` is the only required key:
 Save as UTF-8. `--level` supplies a fallback for items without `storyLevel`.
 `import` needs `--yes` to actually send; `--dry-run` prints the request instead.
 
+The API accepts at most **50 stories per request**; `import` splits larger files
+into several requests by itself. Every item is validated before anything is
+sent, and titles that already exist in the backlog or repeat in the file are
+flagged.
+
 A partially successful import returns HTTP 207: the successful items are created
-and the failed ones are reported individually. It is not a transaction — re-running
+and the failed ones are reported individually (`code` and `reason` per item, in
+request order). It is not a transaction — re-running
 the whole file after a partial failure creates duplicates of what already
 succeeded.
 
